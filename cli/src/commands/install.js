@@ -1,4 +1,8 @@
 // @flow
+import chalk from 'chalk';
+import semver from 'semver';
+
+import type {FlowSpecificVer} from '../lib/flowVersion';
 import {signCodeStream} from '../lib/codeSign';
 import {copyFile, mkdirp} from '../lib/fileUtils';
 import {child_process} from '../lib/node';
@@ -7,7 +11,7 @@ import {findFlowRoot} from '../lib/flowProjectUtils';
 
 import {
   toSemverString as flowVersionToSemver,
-  determineFlowSpecificVersion,
+  parseFlowSpecificVer,
 } from '../lib/flowVersion';
 import type {FlowVersion} from '../lib/flowVersion';
 
@@ -23,6 +27,7 @@ import {
 } from '../lib/npm/npmLibDefs';
 
 import {
+  findFlowSpecificVer,
   findWorkspacesPackages,
   getPackageJsonData,
   getPackageJsonDependencies,
@@ -37,11 +42,6 @@ import {
 } from '../lib/cacheRepoUtils';
 
 import {getRangeLowerBound} from '../lib/semver';
-
-import colors from 'colors/safe';
-
-import semver from 'semver';
-
 import {createStub, pkgHasFlowFiles} from '../lib/stubUtils';
 
 import typeof Yargs from 'yargs';
@@ -60,7 +60,7 @@ export type Args = {
   packageDir?: mixed, // string
   ignoreDeps?: mixed, // Array<string>
   rootDir?: mixed, // string,
-  useCacheUntil?: mixed, // number (milliseconds)
+  useCacheUntil?: mixed, // seconds
   explicitLibDefs: mixed, // Array<string>
   ...
 };
@@ -150,10 +150,7 @@ export async function run(args: Args): Promise<number> {
       : process.cwd();
   const packageDir =
     typeof args.packageDir === 'string' ? path.resolve(args.packageDir) : cwd;
-  const flowVersion = await determineFlowSpecificVersion(
-    packageDir,
-    args.flowVersion,
-  );
+  const flowVersion = await determineFlowVersion(packageDir, args.flowVersion);
   const libdefDir =
     typeof args.libdefDir === 'string' ? args.libdefDir : 'flow-typed';
   if (args.ignoreDeps !== undefined && !Array.isArray(args.ignoreDeps)) {
@@ -211,11 +208,39 @@ export async function run(args: Args): Promise<number> {
       await child_process.execP('npx flow stop');
       await child_process.execP('npx flow');
     } catch (e) {
-      console.log(colors.red('!! Flow restarted with some errors'));
+      console.log(chalk.red('!! Flow restarted with some errors'));
     }
   }
 
   return 0;
+}
+
+async function determineFlowVersion(
+  cwd: string,
+  flowVersionArg?: mixed,
+): Promise<{|
+  kind: 'specific',
+  ver: FlowSpecificVer,
+|}> {
+  if (flowVersionArg && typeof flowVersionArg === 'string') {
+    // Be permissive if the prefix 'v' is left off
+    let flowVersionStr =
+      flowVersionArg[0] === 'v' ? flowVersionArg : `v${flowVersionArg}`;
+
+    if (/^v[0-9]+\.[0-9]+$/.test(flowVersionStr)) {
+      flowVersionStr = `${flowVersionStr}.0`;
+    }
+
+    return {
+      kind: 'specific',
+      ver: parseFlowSpecificVer(flowVersionStr),
+    };
+  } else {
+    return {
+      kind: 'specific',
+      ver: await findFlowSpecificVer(cwd),
+    };
+  }
 }
 
 async function installCoreLibDefs(): Promise<number> {
@@ -491,8 +516,8 @@ async function installNpmLibDefs({
       ([libDef, {name: pkgName, ver: pkgVersion}]) => {
         console.log(
           '  • libdef: %s (satisfies %s)',
-          colors.yellow(`${libDef.name}_${libDef.version}`),
-          colors.bold(`${pkgName}@${pkgVersion}`),
+          chalk.yellow(`${libDef.name}_${libDef.version}`),
+          chalk.bold(`${pkgName}@${pkgVersion}`),
         );
 
         const libDefPlural =
@@ -515,14 +540,14 @@ async function installNpmLibDefs({
     // If the user specified an explicit library to be installed, don't generate
     // a stub if no libdef exists -- just inform them that one doesn't exist
     console.log(
-      colors.red(
+      chalk.red(
         `!! No flow@${flowVersionToSemver(flowVersion)}-compatible libdefs ` +
           `found in flow-typed for the explicitly requested libdefs. !!`,
       ) +
         '\n' +
         '\n' +
         'Consider using `%s` to generate an empty libdef that you can fill in.',
-      colors.bold(`flow-typed create-stub ${explicitLibDefs.join(' ')}`),
+      chalk.bold(`flow-typed create-stub ${explicitLibDefs.join(' ')}`),
     );
 
     return 1;
@@ -544,7 +569,7 @@ async function installNpmLibDefs({
       );
 
       console.log(
-        colors.red(
+        chalk.red(
           `\n!! No flow@${flowVersionToSemver(
             flowVersion,
           )}-compatible libdefs ` +
@@ -561,7 +586,7 @@ async function installNpmLibDefs({
           `We've generated ${'`'}any${'`'}-typed stubs for ${plural[1]}, but ` +
           `consider submitting \n` +
           `${plural[0]} for ${plural[2]} to ` +
-          `${colors.bold('https://github.com/flowtype/flow-typed/')}\n`,
+          `${chalk.bold('https://github.com/flowtype/flow-typed/')}\n`,
       );
     }
   }
@@ -591,13 +616,13 @@ async function installNpmLibDef(
     if (!overwrite && (await fs.exists(filePath))) {
       console.error(
         '  • %s\n' + '    %s\n    %s\n    └> %s',
-        colors.bold(
-          colors.red(
+        chalk.bold(
+          chalk.red(
             `${terseFilePath} already exists and appears to have been manually ` +
               `written or changed!`,
           ),
         ),
-        colors.green(
+        chalk.green(
           `Consider contributing your changes back to flow-typed repository :)`,
         ),
         `Read more at https://github.com/flowtype/flow-typed/wiki/Contributing-Library-Definitions`,
@@ -614,9 +639,9 @@ async function installNpmLibDef(
     await copyFile(npmLibDef.path, filePath, codeSignPreprocessor);
 
     console.log(
-      colors.bold('  • %s\n' + '    └> %s'),
+      chalk.bold('  • %s\n' + '    └> %s'),
       fileName,
-      colors.green(`.${path.sep}${terseFilePath}`),
+      chalk.green(`.${path.sep}${terseFilePath}`),
     );
 
     // Remove any lingering stubs
@@ -638,6 +663,7 @@ async function installNpmLibDef(
 }
 
 export {
+  determineFlowVersion as _determineFlowVersion,
   installNpmLibDefs as _installNpmLibDefs,
   installNpmLibDef as _installNpmLibDef,
 };
